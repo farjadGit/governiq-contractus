@@ -7,6 +7,8 @@ from validator import validate_rows
 from fastapi import Request
 import urllib.parse
 
+app = FastAPI(title="Contractus Service", version="0.1.0")
+
 @app.post("/slack")
 async def slack_handler(request: Request):
     form = await request.form()
@@ -25,7 +27,6 @@ async def slack_handler(request: Request):
 
 
 GOVERNIQ_URL = os.getenv("GOVERNIQ_URL", "http://localhost:8010")
-app = FastAPI(title="Contractus Service", version="0.1.0")
 
 class Contract(BaseModel):
     contract_id: str
