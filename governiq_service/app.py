@@ -8,9 +8,27 @@ from store import Store
 from responder import answer_query
 import time
 from collections import Counter, defaultdict
+import os, requests
+
+# 👇 Mini-Patch: DB-Pfad dynamisch aus ENV lesen
+DB_PATH = os.getenv("GOVERNIQ_DB_PATH", "governiq.db")
 
 app = FastAPI(title="GovernIQ Service", version="0.1.2")
-store = Store(db_path="governiq.db")
+
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
+
+@app.post("/_selftest/slack")
+def selftest_slack():
+    if not SLACK_WEBHOOK:
+        return {"ok": False, "reason": "SLACK_WEBHOOK not set in env"}
+    try:
+        resp = requests.post(SLACK_WEBHOOK, json={"text": "GovernIQ self-test ✅"}, timeout=8)
+        return {"ok": resp.ok, "status": resp.status_code, "body": resp.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+store = Store(db_path=DB_PATH)
 store.init()
 
 class Event(BaseModel):
