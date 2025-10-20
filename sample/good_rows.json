@@ -1,0 +1,14 @@
+[
+  {
+    "order_id": "O1",
+    "order_date": "2025-10-18T10:30:00",
+    "amount": 12.5,
+    "currency": "EUR"
+  },
+  {
+    "order_id": "O2",
+    "order_date": "2025-10-18T10:45:00",
+    "amount": 9.9,
+    "currency": "EUR"
+  }
+]

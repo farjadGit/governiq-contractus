@@ -1,0 +1,13 @@
+contract_id: sales_orders_v1
+owner: team_sales
+schema:
+  order_id: string
+  order_date: datetime
+  amount: float
+  currency: string
+sla:
+  freshness: "1h"
+  freshness_field: "order_date"
+  completeness: ">=99%"
+change_policy:
+  breaking_change_notice: "14d"

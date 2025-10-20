@@ -1,0 +1,19 @@
+# GovernIQ Service Dependencies
+
+# --- Core web stack ---
+fastapi==0.115.2
+uvicorn==0.30.6
+pydantic==2.9.2
+requests==2.32.3
+
+# --- Optional AI integrations ---
+openai==1.51.0          # for LLM_MODE=openai
+# requests also supports LLM_MODE=llama via Ollama local API
+
+# --- Optional date utilities (shared with Contractus) ---
+python-dateutil==2.9.0.post0
+
+# --- Notes ---
+#  LLM_MODE=openai  →  uses OpenAI API (requires OPENAI_API_KEY)
+#  LLM_MODE=llama   →  uses Ollama local API (requires Ollama running locally)
+#  LLM=on/off       →  master toggle to enable or disable LLM mode
