@@ -114,6 +114,16 @@ def diag_llm():
         "openai_version_in_container": ver
     }
 
+# add near your other routes, after `app = FastAPI(...)` and after `store` + imports exist
+@app.get("/_selftest/llm")
+def selftest_llm():
+    try:
+        events = store.fetch_events(limit=5)
+        reply = answer_query("Summarize the latest dataset status in one short sentence.", events)
+        return {"ok": True, "sample_answer": reply}
+    except Exception as e:
+        print(f"[LLM][SELFTEST][ERROR] {e}")
+        return {"ok": False, "error": str(e)}
 
 @app.get("/ask")
 def ask(q: str = Query(..., description="Natural language question")):
