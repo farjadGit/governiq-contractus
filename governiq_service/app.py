@@ -52,21 +52,25 @@ def ingest_event(evt: Event):
     data = evt.model_dump()
     store.insert_event(data)
 
-    if SLACK_WEBHOOK and data.get("status") == "fail" and should_alert(ds):
-        ds = data.get("dataset","?")
-        owner = data.get("owner") or "n/a"
-        vio = data.get("violations") or []
-        vio_lines = []
-        for v in vio:
-            dim = v.get("dimension","?")
-            exp = v.get("expected","?")
-            act = v.get("actual") or v.get("actual_seconds") or "?"
-            vio_lines.append(f"• {dim}: expected {exp}, actual {act}")
-        vio_text = "\n".join(vio_lines) or "• (none)"
+    # --- DEBUG: log every event
+    ds = data.get("dataset", "?")
+    status = data.get("status", "?")
+    owner = data.get("owner") or "n/a"
+    print(f"[EVENT] dataset={ds} status={status} owner={owner}")
 
-        # Optional: Link zur Events-Seite (Dashboard-URL setzen)
-        dash = os.getenv("GOVERNIQ_PUBLIC_URL", "")
+    # build violation summary
+    vios = data.get("violations") or []
+    vio_lines = []
+    for v in vios:
+        dim = v.get("dimension", "?")
+        exp = v.get("expected", "?")
+        act = v.get("actual") or v.get("actual_seconds") or "?"
+        vio_lines.append(f"• {dim}: expected {exp}, actual {act}")
+    vio_text = "\n".join(vio_lines) or "• (none)"
 
+    # only alert on fails (and only selected datasets if filter set)
+    if SLACK_WEBHOOK and status == "fail" and should_alert(ds):
+        dash = os.getenv("GOVERNIQ_PUBLIC_URL", "")  # optional button link
         payload = {
           "blocks": [
             {"type":"header","text":{"type":"plain_text","text":"GovernIQ Alert"}},
@@ -77,14 +81,16 @@ def ingest_event(evt: Event):
               {"type":"mrkdwn","text":f"*When:*\n{time.strftime('%Y-%m-%d %H:%M:%S')}"},
             ]},
             {"type":"section","text":{"type":"mrkdwn","text":f"*Violations*\n{vio_text}"}},
-            *([{"type":"actions","elements":[
+          ] + (
+            [{"type":"actions","elements":[
               {"type":"button","text":{"type":"plain_text","text":"Open in GovernIQ"},
                "url": f"{dash}/?ds={ds}"}
-            ]}] if dash else [])
-          ]
+            ]}] if dash else []
+          )
         }
         try:
-            requests.post(SLACK_WEBHOOK, json=payload, timeout=8)
+            r = requests.post(SLACK_WEBHOOK, json=payload, timeout=8)
+            print(f"[SLACK] status={r.status_code} body={r.text[:200]}")
         except Exception as e:
             print(f"[SLACK][ERROR] {e}")
 
