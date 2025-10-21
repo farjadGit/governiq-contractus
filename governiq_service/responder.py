@@ -9,6 +9,43 @@ LLM_MODE  = os.getenv("LLM_MODE", "openai").lower()  # "openai" | "llama"
 OPENAI_MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_URL    = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OPENAI_TRANSPORT = os.getenv("OPENAI_TRANSPORT", "http")  # "http" (empfohlen) oder "sdk"
+
+import json, requests
+
+def _openai_answer_http(query: str, events: List[dict]) -> str:
+    sys = (
+        "You are GovernIQ, a data governance copilot. "
+        "Be concise (max 6 sentences). Include dataset, owner, status, violations "
+        "(freshness/completeness), and likely root cause. If nothing failed, say so."
+    )
+    user = f"Question: {query}\n\nRecent events:\n{_summarize_events_for_prompt(events)}\n\nAnswer clearly."
+    try:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return "(LLM openai unavailable – fallback) OPENAI_API_KEY missing"
+
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {"role": "system", "content": sys},
+                {"role": "user", "content": user}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 300
+        }
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=30
+        )
+        if r.status_code != 200:
+            return f"(LLM openai unavailable – fallback) HTTP {r.status_code}: {r.text[:200]}"
+        data = r.json()
+        return (data["choices"][0]["message"]["content"] or "").strip() or "(empty response)"
+    except Exception as ex:
+        return f"(LLM openai unavailable – fallback) {ex}"
 
 # -------------- Prompt helpers --------------
 def _summarize_events_for_prompt(events: List[dict]) -> str:
@@ -134,4 +171,8 @@ def answer_query(q: str, events: List[dict]) -> str:
     if LLM_MODE == "llama":
         return _ollama_answer(q, events)
     # default: openai
-    return _openai_answer(q, events)
+    if OPENAI_TRANSPORT == "http":
+        return _openai_answer_http(q, events)
+    else:
+        # falls du später wieder zur SDK willst
+        return _openai_answer(q, events)
