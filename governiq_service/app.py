@@ -99,6 +99,21 @@ def ingest_event(evt: Event):
 @app.get("/events")
 def list_events(limit: int = 50):
     return store.fetch_events(limit=limit)
+@app.get("/_diag/llm")
+def diag_llm():
+    try:
+        import openai as openai_pkg
+        ver = getattr(openai_pkg, "__version__", "unknown")
+    except Exception:
+        ver = "not-importable"
+    import os
+    return {
+        "LLM": os.getenv("LLM"),
+        "LLM_MODE": os.getenv("LLM_MODE"),
+        "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
+        "openai_version_in_container": ver
+    }
+
 
 @app.get("/ask")
 def ask(q: str = Query(..., description="Natural language question")):
