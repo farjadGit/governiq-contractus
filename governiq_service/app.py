@@ -16,6 +16,13 @@ DB_PATH = os.getenv("GOVERNIQ_DB_PATH", "governiq.db")
 app = FastAPI(title="GovernIQ Service", version="0.1.2")
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
+# Optional: welche Datasets sollen Alerts auslösen
+ALERT_DATASETS = set((os.getenv("ALERT_DATASETS", "").split(",")))
+
+def should_alert(ds: str) -> bool:
+    """Return True, wenn für dieses Dataset ein Alert gesendet werden soll"""
+    return (not ALERT_DATASETS or ds in ALERT_DATASETS)
+
 
 @app.post("/_selftest/slack")
 def selftest_slack():
