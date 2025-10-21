@@ -52,7 +52,7 @@ def ingest_event(evt: Event):
     data = evt.model_dump()
     store.insert_event(data)
 
-    if SLACK_WEBHOOK and data.get("status") == "fail":
+    if SLACK_WEBHOOK and data.get("status") == "fail" and should_alert(ds):
         ds = data.get("dataset","?")
         owner = data.get("owner") or "n/a"
         vio = data.get("violations") or []
