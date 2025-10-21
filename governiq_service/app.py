@@ -8,7 +8,7 @@ from store import Store
 from responder import answer_query
 import time
 from collections import Counter, defaultdict
-import os, requests
+import os, requests, time
 
 # 👇 Mini-Patch: DB-Pfad dynamisch aus ENV lesen
 DB_PATH = os.getenv("GOVERNIQ_DB_PATH", "governiq.db")
@@ -42,7 +42,45 @@ class Event(BaseModel):
 
 @app.post("/events")
 def ingest_event(evt: Event):
-    store.insert_event(evt.model_dump())
+    data = evt.model_dump()
+    store.insert_event(data)
+
+    if SLACK_WEBHOOK and data.get("status") == "fail":
+        ds = data.get("dataset","?")
+        owner = data.get("owner") or "n/a"
+        vio = data.get("violations") or []
+        vio_lines = []
+        for v in vio:
+            dim = v.get("dimension","?")
+            exp = v.get("expected","?")
+            act = v.get("actual") or v.get("actual_seconds") or "?"
+            vio_lines.append(f"• {dim}: expected {exp}, actual {act}")
+        vio_text = "\n".join(vio_lines) or "• (none)"
+
+        # Optional: Link zur Events-Seite (Dashboard-URL setzen)
+        dash = os.getenv("GOVERNIQ_PUBLIC_URL", "")
+
+        payload = {
+          "blocks": [
+            {"type":"header","text":{"type":"plain_text","text":"GovernIQ Alert"}},
+            {"type":"section","fields":[
+              {"type":"mrkdwn","text":f"*Dataset:*\n`{ds}`"},
+              {"type":"mrkdwn","text":f"*Owner:*\n{owner}"},
+              {"type":"mrkdwn","text":"*Status:*\n❌ fail"},
+              {"type":"mrkdwn","text":f"*When:*\n{time.strftime('%Y-%m-%d %H:%M:%S')}"},
+            ]},
+            {"type":"section","text":{"type":"mrkdwn","text":f"*Violations*\n{vio_text}"}},
+            *([{"type":"actions","elements":[
+              {"type":"button","text":{"type":"plain_text","text":"Open in GovernIQ"},
+               "url": f"{dash}/?ds={ds}"}
+            ]}] if dash else [])
+          ]
+        }
+        try:
+            requests.post(SLACK_WEBHOOK, json=payload, timeout=8)
+        except Exception as e:
+            print(f"[SLACK][ERROR] {e}")
+
     return {"ok": True}
 
 @app.get("/events")
