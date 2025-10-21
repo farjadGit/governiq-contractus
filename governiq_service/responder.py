@@ -29,13 +29,15 @@ def _summarize_events_for_prompt(events: List[dict]) -> str:
     return "\n".join(lines) or "(no events)"
 
 # -------------- OpenAI backend --------------
+# -------------- OpenAI backend --------------
 _openai_client = None
 def _get_openai_client():
     global _openai_client
     if _openai_client is None:
         from openai import OpenAI
-        _openai_client = OpenAI()  # reads OPENAI_API_KEY from env
+        _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # explicit for v1.x
     return _openai_client
+
 
 def _openai_answer(query: str, events: List[dict]) -> str:
     sys = (
@@ -54,7 +56,9 @@ def _openai_answer(query: str, events: List[dict]) -> str:
         )
         return res.choices[0].message.content.strip()
     except Exception as ex:
+        print(f"[LLM][OPENAI][ERROR] {ex}")  # <-- will show up in Render logs
         return f"(LLM openai unavailable – fallback) {ex}"
+
 
 # -------------- Llama (Ollama) backend --------------
 def _ollama_answer(query: str, events: List[dict]) -> str:
