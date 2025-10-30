@@ -1,14 +1,14 @@
 # governiq_service/app.py
 
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Query, UploadFile, File
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from store import Store
 from responder import answer_query
 import time
 from collections import Counter, defaultdict
-import os, requests, time
+import csv, io, json, os, time
 
 # 👇 Mini-Patch: DB-Pfad dynamisch aus ENV lesen
 DB_PATH = os.getenv("GOVERNIQ_DB_PATH", "governiq.db")
@@ -99,6 +99,114 @@ def ingest_event(evt: Event):
 @app.get("/events")
 def list_events(limit: int = 50):
     return store.fetch_events(limit=limit)
+
+# --- Healthcheck (optional, praktisch) ---
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+# --- Export: JSON ---
+@app.get("/export.json")
+def export_json(limit: int = 100_000, status: Optional[str] = None, owner: Optional[str] = None):
+    events = store.fetch_events(limit=limit)
+    if status:
+        events = [e for e in events if e.get("status") == status]
+    if owner:
+        events = [e for e in events if (e.get("owner") or "") == owner]
+    return Response(
+        content=json.dumps(events, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="events.json"'}
+    )
+
+# --- Export: CSV ---
+@app.get("/export.csv")
+def export_csv(limit: int = 100_000, status: Optional[str] = None, owner: Optional[str] = None):
+    events = store.fetch_events(limit=limit)
+    if status:
+        events = [e for e in events if e.get("status") == status]
+    if owner:
+        events = [e for e in events if (e.get("owner") or "") == owner]
+
+    # CSV-Felder (einfach & robust)
+    cols = ["dataset", "contract_id", "owner", "status", "ts", "errors", "warnings", "violations"]
+
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for e in events:
+        row = {
+            "dataset":   e.get("dataset", ""),
+            "contract_id": e.get("contract_id", e.get("dataset", "")),
+            "owner":     e.get("owner", ""),
+            "status":    e.get("status", ""),
+            "ts":        e.get("ts", ""),  # falls dein Store einen Zeitstempel speichert
+            # JSON-Felder als String serialisieren
+            "errors":    json.dumps(e.get("errors") or [], ensure_ascii=False),
+            "warnings":  json.dumps(e.get("warnings") or [], ensure_ascii=False),
+            "violations":json.dumps(e.get("violations") or [], ensure_ascii=False),
+        }
+        w.writerow(row)
+
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="events.csv"'}
+    )
+
+# --- Import: JSON (Liste von Events) ---
+from pydantic import BaseModel
+
+class ImportPayload(BaseModel):
+    events: List[Event]
+
+@app.post("/import.json")
+def import_json(payload: ImportPayload):
+    count = 0
+    for evt in payload.events:
+        store.insert_event(evt.model_dump())
+        count += 1
+    return {"imported": count}
+
+# --- Import: CSV (Upload) ---
+@app.post("/import.csv")
+async def import_csv(file: UploadFile = File(...)):
+    content = await file.read()
+    text = content.decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    count = 0
+
+    def parse_json_field(row, name):
+        val = row.get(name) or row.get(f"{name}_json")
+        if not val:
+            return []
+        try:
+            return json.loads(val)
+        except Exception:
+            # falls einfache Strings in der CSV stehen
+            return [str(val)]
+
+    for row in reader:
+        ds = row.get("dataset") or row.get("Dataset") or row.get("name")
+        status = row.get("status") or row.get("Status")
+        if not ds or not status:
+            # Zeilen ohne Mindestfelder überspringen
+            continue
+        evt = {
+            "dataset": ds,
+            "contract_id": row.get("contract_id") or ds,
+            "owner": row.get("owner") or "",
+            "status": status,
+            "errors": parse_json_field(row, "errors"),
+            "warnings": parse_json_field(row, "warnings"),
+            "violations": parse_json_field(row, "violations"),
+        }
+        store.insert_event(evt)
+        count += 1
+
+    return {"imported": count}
+
 @app.get("/_diag/llm")
 def diag_llm():
     try:
