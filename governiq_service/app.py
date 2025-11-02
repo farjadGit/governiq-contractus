@@ -268,6 +268,24 @@ def import_json(payload: ImportPayload):
         store.insert_event(evt.model_dump())
         count += 1
     return {"imported": count}
+@app.post("/_seed_demo")
+def seed_demo(n:int=30):
+    import random, time
+    owners = ["team_sales","team_finance","team_ops"]
+    datasets = ["sales_orders_v1","customer_dim_v2","inventory_snap"]
+    for _ in range(n):
+        ds = random.choice(datasets)
+        owner = random.choice(owners)
+        status = random.choice(["pass","fail","pass","pass"])
+        vio = []
+        if status=="fail":
+            if random.random()<0.6:
+                vio.append({"dimension":"freshness","expected":3600,"actual_seconds":random.randint(3700,20000)})
+            else:
+                vio.append({"dimension":"completeness","expected":0.99,"actual":round(random.uniform(0.85,0.97),3)})
+        evt = {"dataset":ds,"contract_id":ds,"owner":owner,"status":status,"violations":vio,"ts":int(time.time())-random.randint(0,7*86400)}
+        store.insert_event(evt)
+    return {"ok": True}
 
 # --- Import: CSV (Upload) ---
 @app.post("/import.csv")
@@ -338,7 +356,79 @@ def ask(q: str = Query(..., description="Natural language question")):
     events = store.fetch_events(limit=200)
     reply = answer_query(q, events)
     return {"question": q, "answer": reply}
+@app.get("/dataset", response_class=HTMLResponse)
+def dataset_detail(name: str = Query(..., description="dataset name"),
+                   days: int = 14, limit: int = 200):
+    # Rohdaten holen und filtern
+    ev = store.fetch_events(limit=10_000)
+    ev = [e for e in ev if (e.get("dataset") or "").lower() == name.lower()]
 
+    # Zeitfenster
+    from datetime import datetime, timedelta
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    def parse_ts(x):
+        import datetime as _dt
+        t = x.get("ts")
+        if isinstance(t, (int, float)): return _dt.datetime.utcfromtimestamp(t)
+        if isinstance(t, str):
+            try: return _dt.datetime.fromisoformat(t.replace("Z",""))
+            except: return None
+        return None
+    ev = [e for e in ev if (parse_ts(e) and parse_ts(e) >= cutoff)]
+    ev = sorted(ev, key=lambda x: x.get("ts",0), reverse=True)[:limit]
+
+    # Kennzahlen
+    total = len(ev)
+    fails = [e for e in ev if e.get("status")=="fail"]
+    passes = total - len(fails)
+    owner  = (ev[0].get("owner") if ev else "") or "n/a"
+
+    # Violations aggregieren
+    from collections import Counter
+    by_dim = Counter([v.get("dimension") for e in ev for v in (e.get("violations") or [])])
+
+    # Mini-HTML
+    rows = []
+    for e in ev:
+        import time
+        t = e.get("ts",""); 
+        if isinstance(t,(int,float)): when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+        else: when = str(t)
+        vio = ", ".join([f'{v.get("dimension","?")}: exp={v.get("expected","?")}, act={v.get("actual") or v.get("actual_seconds","?")}'
+                         for v in (e.get("violations") or [])]) or "—"
+        rows.append(f"<tr><td>{when}</td><td>{e.get('status')}</td><td>{vio}</td></tr>")
+
+    # einfache Badges
+    def badge(s):
+        bg = "#e6f7ee" if s=="pass" else "#ffe8e8"; fg = "#1f7a4d" if s=="pass" else "#993333"
+        return f'<span style="padding:2px 8px;border-radius:10px;background:{bg};color:{fg};font-weight:600;">{s}</span>'
+
+    dims_html = "".join([f"<li>{k or 'n/a'}: {v}</li>" for k,v in by_dim.most_common()]) or "<li>—</li>"
+    table = f"""
+    <table style="width:100%;border-collapse:collapse;font-size:14px;">
+      <thead><tr style="text-align:left;border-bottom:2px solid #ddd;">
+        <th style="padding:6px 8px;">Time (UTC)</th>
+        <th style="padding:6px 8px;">Status</th>
+        <th style="padding:6px 8px;">Violations</th>
+      </tr></thead>
+      <tbody>{''.join(rows) if rows else '<tr><td colspan="3" style="padding:12px;color:#777;">No events in range.</td></tr>'}</tbody>
+    </table>
+    """
+    html = f"""
+    <html><head><meta charset="utf-8"/><title>Dataset – {name}</title></head>
+    <body style="font-family:system-ui;max-width:1000px;margin:0 auto;padding:24px;">
+      <a href="/" style="text-decoration:none;">← Back</a>
+      <h1 style="margin:8px 0 0;">Dataset: {name}</h1>
+      <div style="color:#666;margin-bottom:10px;">Owner: <b>{owner}</b> · Window: last {days}d · Total: {total} ({badge('pass')} {passes} / {badge('fail')} {len(fails)})</div>
+
+      <h3 style="margin:10px 0 6px;">Violations by dimension</h3>
+      <ul>{dims_html}</ul>
+
+      <h3 style="margin:10px 0 6px;">Recent events</h3>
+      {table}
+    </body></html>
+    """
+    return HTMLResponse(html)
 # NEW: simple analytics for last N hours (default 24)
 @app.get("/analytics")
 def analytics(hours: int = 24):
@@ -482,7 +572,7 @@ def dashboard():
         const div = document.createElement('div');
         div.className = 'event';
         div.innerHTML = `
-          <div><span class="badge ${s}">${ev.status}</span> <strong>${ev.dataset}</strong> <span class="muted">• ${when}</span></div>
+          <div><span class="badge ${s}">${ev.status}</span> <strong><a href="/dataset?name=${encodeURIComponent(ev.dataset)}">${ev.dataset}</a></strong> <span class="muted">• ${when}</span></div>
           <div class="muted">owner: ${ev.owner || 'n/a'}</div>
           ${vio ? `<div>violations: ${vio}</div>` : ``}
           ${errors ? `<div class="muted">errors: ${errors}</div>` : ``}
