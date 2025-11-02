@@ -1,7 +1,7 @@
 # governiq_service/app.py
 
 from fastapi import FastAPI, Query, UploadFile, File
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from store import Store
@@ -9,6 +9,8 @@ from responder import answer_query
 import time
 from collections import Counter, defaultdict
 import csv, io, json, os, time
+import sqlite3
+from contextlib import closing
 
 # 👇 Mini-Patch: DB-Pfad dynamisch aus ENV lesen
 DB_PATH = os.getenv("GOVERNIQ_DB_PATH", "governiq.db")
@@ -37,6 +39,19 @@ def selftest_slack():
 
 store = Store(db_path=DB_PATH)
 store.init()
+
+# einmalige Index-Erstellung (idempotent)
+try:
+    with closing(sqlite3.connect(DB_PATH, check_same_thread=False)) as con, closing(con.cursor()) as cur:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_owner ON events(owner)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_dataset ON events(dataset)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_contract ON events(contract_id)")
+        con.commit()
+except Exception as e:
+    print("[DB][INDEX] skipped/failed:", e)
+
 
 class Event(BaseModel):
     dataset: str
@@ -99,6 +114,54 @@ def ingest_event(evt: Event):
 @app.get("/events")
 def list_events(limit: int = 50):
     return store.fetch_events(limit=limit)
+# governiq_app.py (oder wo deine FastAPI-App/DB-Helfer liegen)
+app = FastAPI()
+
+@app.get("/analytics/fails_per_day")
+def api_fails_per_day(
+    days: int = 30,
+    owner: Optional[str] = None,
+    q: Optional[str] = None,
+    dimension: Optional[str] = None
+):
+    data = fails_per_day(days=days, owner=owner, q=q, dimension=dimension)
+    return JSONResponse(content={"data": data})
+
+
+def fails_per_day(days: int = 30, owner: Optional[str] = None, q: Optional[str] = None, dimension: Optional[str] = None):
+    """
+    Aggregiert Fail-Events pro Kalendertag aus SQLite.
+    Annahme: events-Tabelle mit Spalten: ts (UNIX epoch), status, dataset, owner, contract_id, violations (TEXT/JSON).
+    """
+    filters = ["status = 'fail'", "ts >= strftime('%s','now','-{} days')".format(int(days))]
+    params = []
+
+    if owner:
+        filters.append("owner = ?")
+        params.append(owner)
+
+    if q:
+        like = f"%{q}%"
+        filters.append("(dataset LIKE ? OR owner LIKE ? OR contract_id LIKE ?)")
+        params.extend([like, like, like])
+
+    if dimension:
+        filters.append("CAST(violations AS TEXT) LIKE ?")
+        params.append(f"%{dimension}%")
+
+    where_sql = " AND ".join(filters)
+    sql = f"""
+      SELECT DATE(datetime(ts, 'unixepoch')) AS day, COUNT(*) AS fail_count
+      FROM events
+      WHERE {where_sql}
+      GROUP BY day
+      ORDER BY day ASC
+    """
+
+    with closing(sqlite3.connect(DB_PATH, check_same_thread=False)) as con, closing(con.cursor()) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    return [{"day": r[0], "fail_count": r[1]} for r in rows]
 
 # --- Healthcheck (optional, praktisch) ---
 @app.get("/health")
@@ -310,6 +373,7 @@ def dashboard():
 </style>
 </head>
 <body>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>                      
   <h1>GovernIQ – Event Feed, Analytics & Ask</h1>
 
   <div class="grid">
@@ -352,6 +416,9 @@ def dashboard():
         <h3 style="font-size:14px;margin:6px 0">Violations by dimension</h3>
         <table id="tblDims"><thead><tr><th>Dimension</th><th>Count</th></tr></thead><tbody></tbody></table>
       </div>
+    <h3 style="font-size:14px;margin:10px 0 6px;">Fails pro Tag</h3>
+    <div style="height:260px; border:1px solid #eee; border-radius:8px; padding:8px;">
+      <canvas id="failsPerDay" style="width:100%; height:240px;"></canvas>                    
     </div>
   </div>
 
@@ -364,7 +431,7 @@ def dashboard():
       el.innerHTML = '';
       data.forEach(ev => {
         const s = ev.status === 'pass' ? 'ok' : 'fail';
-        const when = new Date((ev._ts || 0)*1000).toLocaleString();
+        const when = new Date(((ev.ts || ev._ts || 0) * 1000)).toLocaleString();
         const vio = (ev.violations || []).map(v => {
           if (v.dimension === 'freshness') {
             return `freshness: actual ${v.actual_seconds || '?'}s > ${v.expected}`;
@@ -437,7 +504,51 @@ def dashboard():
       tbodyDims.appendChild(tr);
     });
   }
+  let _trendChart = null;
 
+  async function loadFailsTrend() {
+    const hoursSel = document.getElementById('hours');
+    const hours = Number(hoursSel.value || '24');
+    // days aus hours ableiten (mindestens 1)
+    const days = Math.max(1, Math.ceil(hours / 24));
+
+    // vorhandene Filter aus der URL übernehmen (optional)
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get('days')) params.set('days', String(days)); else params.set('days', String(days));
+    // mappe evtl. 'search' -> 'q'
+    if (params.get('search') && !params.get('q')) params.set('q', params.get('search'));
+
+    const url = '/analytics/fails_per_day?' + params.toString();
+    const res = await fetch(url);
+    const { data } = await res.json();
+
+    const labels = data.map(d => d.day);
+    const values = data.map(d => d.fail_count);
+
+    const ctx = document.getElementById('failsPerDay').getContext('2d');
+    if (_trendChart) {
+      _trendChart.data.labels = labels;
+      _trendChart.data.datasets[0].data = values;
+      _trendChart.update();
+    } else {
+      _trendChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{ label: 'Failing Events pro Tag', data: values, tension: 0.25, fill: false }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: 'Tag' } },
+            y: { beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Fails' } }
+          }
+        }
+      });
+    }
+  }
+ 
   document.getElementById('askBtn').addEventListener('click', askQ);
   document.getElementById('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') askQ(); });
   document.getElementById('hours').addEventListener('change', loadAnalytics);
