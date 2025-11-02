@@ -39,7 +39,43 @@ def selftest_slack():
 
 store = Store(db_path=DB_PATH)
 store.init()
+def _col_exists(cur, table, col) -> bool:
+    cur.execute(f"PRAGMA table_info({table})")
+    return any(r[1] == col for r in cur.fetchall())
 
+def migrate_events_schema(db_path: str):
+    with closing(sqlite3.connect(db_path, check_same_thread=False)) as con, closing(con.cursor()) as cur:
+        # Falls Tabelle gar nicht existiert → minimal neu anlegen
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'")
+        if not cur.fetchone():
+            cur.execute("""
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER,
+                    dataset TEXT,
+                    contract_id TEXT,
+                    owner TEXT,
+                    status TEXT,
+                    errors TEXT,
+                    warnings TEXT,
+                    violations TEXT
+                )
+            """)
+            con.commit()
+            return
+
+        # Fehlende Spalten ergänzen (idempotent)
+        needed = ["ts INTEGER", "dataset TEXT", "contract_id TEXT",
+                  "owner TEXT", "status TEXT", "errors TEXT", "warnings TEXT", "violations TEXT"]
+        for spec in needed:
+            col = spec.split()[0]
+            if not _col_exists(cur, "events", col):
+                cur.execute(f"ALTER TABLE events ADD COLUMN {spec}")
+
+        con.commit()
+
+# 1) Schema migrieren
+migrate_events_schema(DB_PATH)
 # einmalige Index-Erstellung (idempotent)
 try:
     with closing(sqlite3.connect(DB_PATH, check_same_thread=False)) as con, closing(con.cursor()) as cur:
@@ -65,6 +101,7 @@ class Event(BaseModel):
 @app.post("/events")
 def ingest_event(evt: Event):
     data = evt.model_dump()
+    data["ts"] = data.get("ts") or int(time.time())
     store.insert_event(data)
 
     # --- DEBUG: log every event
@@ -555,6 +592,7 @@ def dashboard():
 
   loadEvents();
   loadAnalytics();
+  loadFailsTrend();                      
   setInterval(loadEvents, 5000);
   setInterval(loadAnalytics, 15000);
 </script>
