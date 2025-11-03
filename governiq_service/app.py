@@ -268,7 +268,7 @@ def import_json(payload: ImportPayload):
         store.insert_event(evt.model_dump())
         count += 1
     return {"imported": count}
-@app.post("/_seed_demo")
+@app.get("/_seed_demo")
 def seed_demo(n:int=30):
     import random, time
     owners = ["team_sales","team_finance","team_ops"]
