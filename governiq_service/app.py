@@ -154,34 +154,20 @@ def list_events(limit: int = 50):
 # governiq_app.py (oder wo deine FastAPI-App/DB-Helfer liegen)
 app = FastAPI()
 
-@app.get("/analytics/fails_per_day")
-def api_fails_per_day(
-    days: int = 30,
-    owner: Optional[str] = None,
-    q: Optional[str] = None,
-    dimension: Optional[str] = None
-):
-    data = fails_per_day(days=days, owner=owner, q=q, dimension=dimension)
-    return JSONResponse(content={"data": data})
-
-
-def fails_per_day(days: int = 30, owner: Optional[str] = None, q: Optional[str] = None, dimension: Optional[str] = None):
-    """
-    Aggregiert Fail-Events pro Kalendertag aus SQLite.
-    Annahme: events-Tabelle mit Spalten: ts (UNIX epoch), status, dataset, owner, contract_id, violations (TEXT/JSON).
-    """
-    filters = ["status = 'fail'", "ts >= strftime('%s','now','-{} days')".format(int(days))]
-    params = []
+def fails_per_day_hours(hours: int = 24, owner: Optional[str] = None,
+                        q: Optional[str] = None, dimension: Optional[str] = None):
+    import sqlite3
+    from contextlib import closing
+    filters = ["status = 'fail'", "ts >= strftime('%s','now', ?)"]
+    params = [f"-{int(hours)} hours"]
 
     if owner:
         filters.append("owner = ?")
         params.append(owner)
-
     if q:
         like = f"%{q}%"
         filters.append("(dataset LIKE ? OR owner LIKE ? OR contract_id LIKE ?)")
         params.extend([like, like, like])
-
     if dimension:
         filters.append("CAST(violations AS TEXT) LIKE ?")
         params.append(f"%{dimension}%")
@@ -194,11 +180,17 @@ def fails_per_day(days: int = 30, owner: Optional[str] = None, q: Optional[str] 
       GROUP BY day
       ORDER BY day ASC
     """
-
     with closing(sqlite3.connect(DB_PATH, check_same_thread=False)) as con, closing(con.cursor()) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
     return [{"day": r[0], "fail_count": r[1]} for r in rows]
+
+@app.get("/analytics/fails_per_day")
+def api_fails_per_day(hours: int = 24, owner: Optional[str] = None,
+                      q: Optional[str] = None, dimension: Optional[str] = None):
+    data = fails_per_day_hours(hours=hours, owner=owner, q=q, dimension=dimension)
+    return {"data": data}
+
 
 # --- Healthcheck (optional, praktisch) ---
 @app.get("/health")
@@ -552,35 +544,38 @@ def dashboard():
 <script>
   async function loadEvents() {
     try {
-      const res = await fetch('/events?limit=50');
-      const data = await res.json();
-      const el = document.getElementById('events');
-      el.innerHTML = '';
-      data.forEach(ev => {
-        const s = ev.status === 'pass' ? 'ok' : 'fail';
-        const when = new Date(((ev.ts || ev._ts || 0) * 1000)).toLocaleString();
-        const vio = (ev.violations || []).map(v => {
-          if (v.dimension === 'freshness') {
-            return `freshness: actual ${v.actual_seconds || '?'}s > ${v.expected}`;
-          } else if (v.dimension === 'completeness') {
-            return `completeness: actual ${v.actual || '?'} vs ${v.expected}`;
-          } else {
-            return JSON.stringify(v);
-          }
-        }).join(' | ');
-        const errors = (ev.errors || []).join('; ');
-        const div = document.createElement('div');
-        div.className = 'event';
-        div.innerHTML = `
-          <div><span class="badge ${s}">${ev.status}</span> <strong><a href="/dataset?name=${encodeURIComponent(ev.dataset)}">${ev.dataset}</a></strong> <span class="muted">• ${when}</span></div>
-          <div class="muted">owner: ${ev.owner || 'n/a'}</div>
-          ${vio ? `<div>violations: ${vio}</div>` : ``}
-          ${errors ? `<div class="muted">errors: ${errors}</div>` : ``}
-        `;
-        el.appendChild(div);
-      });
-    } catch(e) { console.error(e); }
-  }
+    const res = await fetch('/events?limit=50');
+    const raw = await res.json();
+    const data = Array.isArray(raw) ? raw : (raw.items || []); // <-- neu
+    const el = document.getElementById('events');
+    el.innerHTML = '';
+    data.forEach(ev => {
+      const s = ev.status === 'pass' ? 'ok' : 'fail';
+      const when = new Date(((ev.ts || ev._ts || 0) * 1000)).toLocaleString(); // <-- ts/_ts fix
+      const vio = (ev.violations || []).map(v => {
+        if (v.dimension === 'freshness') {
+          return `freshness: actual ${v.actual_seconds || '?'}s > ${v.expected}`;
+        } else if (v.dimension === 'completeness') {
+          return `completeness: actual ${v.actual || '?'} vs ${v.expected}`;
+        } else {
+          return JSON.stringify(v);
+        }
+      }).join(' | ');
+      const errors = (ev.errors || []).join('; ');
+      const div = document.createElement('div');
+      div.className = 'event';
+      div.innerHTML = `
+        <div><span class="badge ${s}">${ev.status}</span>
+             <strong><a href="/dataset?name=${encodeURIComponent(ev.dataset)}">${ev.dataset}</a></strong>
+             <span class="muted">• ${when}</span></div>
+        <div class="muted">owner: ${ev.owner || 'n/a'}</div>
+        ${vio ? `<div>violations: ${vio}</div>` : ``}
+        ${errors ? `<div class="muted">errors: ${errors}</div>` : ``}
+      `;
+      el.appendChild(div);
+    });
+  } catch(e) { console.error(e); }
+}
 
   async function askQ() {
     const btn = document.getElementById('askBtn');
@@ -633,58 +628,46 @@ def dashboard():
   }
   let _trendChart = null;
 
-  async function loadFailsTrend() {
-    const hoursSel = document.getElementById('hours');
-    const hours = Number(hoursSel.value || '24');
-    // days aus hours ableiten (mindestens 1)
-    const days = Math.max(1, Math.ceil(hours / 24));
+  let _trendChart = null;
 
-    // vorhandene Filter aus der URL übernehmen (optional)
-    const params = new URLSearchParams(window.location.search);
-    if (!params.get('days')) params.set('days', String(days)); else params.set('days', String(days));
-    // mappe evtl. 'search' -> 'q'
-    if (params.get('search') && !params.get('q')) params.set('q', params.get('search'));
+async function loadFailsTrend() {
+  const hours = Number(document.getElementById('hours').value || '24');
+  const params = new URLSearchParams(window.location.search);
+  // mappe evtl. 'search' -> 'q'
+  if (params.get('search') && !params.get('q')) params.set('q', params.get('search'));
+  params.set('hours', String(hours));
 
-    const url = '/analytics/fails_per_day?' + params.toString();
-    const res = await fetch(url);
-    const { data } = await res.json();
+  const res = await fetch('/analytics/fails_per_day?' + params.toString());
+  const { data } = await res.json();
+  const labels = data.map(d => d.day);
+  const values = data.map(d => d.fail_count);
 
-    const labels = data.map(d => d.day);
-    const values = data.map(d => d.fail_count);
-
-    const ctx = document.getElementById('failsPerDay').getContext('2d');
-    if (_trendChart) {
-      _trendChart.data.labels = labels;
-      _trendChart.data.datasets[0].data = values;
-      _trendChart.update();
-    } else {
-      _trendChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{ label: 'Failing Events pro Tag', data: values, tension: 0.25, fill: false }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          scales: {
-            x: { title: { display: true, text: 'Tag' } },
-            y: { beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Fails' } }
-          }
-        }
-      });
-    }
+  const ctx = document.getElementById('failsPerDay').getContext('2d');
+  if (!_trendChart) {
+    _trendChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: [{ label: 'Failing Events pro Tag', data: values, tension: 0.25, fill: false }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        scales: { x: { title: { display: true, text: 'Tag' } },
+                  y: { beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Fails' } } } }
+    });
+  } else {
+    _trendChart.data.labels = labels;
+    _trendChart.data.datasets[0].data = values;
+    _trendChart.update();
   }
- 
-  document.getElementById('askBtn').addEventListener('click', askQ);
-  document.getElementById('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') askQ(); });
-  document.getElementById('hours').addEventListener('change', loadAnalytics);
+}
 
-  loadEvents();
-  loadAnalytics();
-  loadFailsTrend();                      
-  setInterval(loadEvents, 5000);
-  setInterval(loadAnalytics, 15000);
+ 
+  // Events binden
+document.getElementById('hours').addEventListener('change', () => { loadAnalytics(); loadFailsTrend(); });
+
+// Initial laden
+loadEvents();
+loadAnalytics();
+loadFailsTrend();
+setInterval(loadEvents, 5000);
+setInterval(loadAnalytics, 15000);
 </script>
 </body>
 </html>
